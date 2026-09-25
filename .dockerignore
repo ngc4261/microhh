@@ -1,0 +1,10 @@
+# Build context is the repository root. Keep .git (submodule init needs it).
+build*/
+**/CMakeCache.txt
+**/CMakeFiles/
+*.nc
+*.log
+*.png
+__pycache__/
+.venv/
+captures/
