@@ -44,6 +44,36 @@ using namespace Finite_difference::O2;
 
 namespace
 {
+    // Fiedler-type vortex: prescribed updraft acceleration in a column
+    // (same formula as the CPU path in force.cxx).
+    template<typename TF> __global__
+    void add_vortex_force_g(TF* const __restrict__ wt,
+                       const TF* const __restrict__ x, const TF* const __restrict__ y,
+                       const TF* const __restrict__ zh,
+                       const TF amp, const TF x0, const TF y0, const TF rmax,
+                       const TF zb, const TF zt,
+                       const int jj, const int kk,
+                       const int istart, const int jstart, const int kstart,
+                       const int iend,   const int jend,   const int kend)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+        const int k = blockIdx.z + kstart + 1;          // w faces above the surface
+
+        if (i < iend && j < jend && k < kend)
+        {
+            const TF z = zh[k];
+            if (z <= zb || z >= zt)
+                return;
+            const TF r = sqrt((x[i]-x0)*(x[i]-x0) + (y[j]-y0)*(y[j]-y0));
+            if (r >= rmax)
+                return;
+            const TF pi = TF(M_PI);
+            const TF c  = cos(TF(0.5)*pi*r/rmax);
+            wt[i + j*jj + k*kk] += amp*c*c*sin(pi*(z-zb)/(zt-zb));
+        }
+    }
+
     template<typename TF> __global__
     void add_pressure_force_g(TF* const __restrict__ ut,
                        const TF fbody,
@@ -254,6 +284,18 @@ void Force<TF>::exec(double dt, Thermo<TF>& thermo, Stats<TF>& stats)
 
     dim3 gridGPU (gridi, gridj, gd.kcells);
     dim3 blockGPU(blocki, blockj, 1);
+
+    if (swvortexforce)
+    {
+        add_vortex_force_g<TF><<<gridGPU, blockGPU>>>(
+            fields.mt.at("w")->fld_g,
+            gd.x_g, gd.y_g, gd.zh_g,
+            vf_amp, vf_x0, vf_y0, vf_r, vf_zb, vf_zt,
+            gd.icells, gd.ijcells,
+            gd.istart, gd.jstart, gd.kstart,
+            gd.iend,   gd.jend,   gd.kend);
+        cuda_check_error();
+    }
 
     if (swlspres == Large_scale_pressure_type::Fixed_flux)
     {

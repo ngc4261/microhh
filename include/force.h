@@ -96,6 +96,15 @@ class Force
         TF dpdx;  ///< Large-scale pressure gradient
         TF fc;    ///< Coriolis parameter.
 
+        // Prescribed updraft forcing in a vertical column (Fiedler-type vortex
+        // in a rotating box; [force] swvortexforce). Acceleration on w:
+        // amp * cos^2(pi r / 2R) * sin(pi (z-zb)/(zt-zb)) for r<R, zb<z<zt.
+        bool swvortexforce;
+        TF vf_amp;          ///< Peak upward acceleration (m s-2).
+        TF vf_x0, vf_y0;    ///< Column centre (m).
+        TF vf_r;            ///< Column radius R (m).
+        TF vf_zb, vf_zt;    ///< Bottom and top of the forcing (m).
+
         std::vector<TF> ug;  ///< Pointer to array u-component geostrophic wind.
         std::vector<TF> vg;  ///< Pointer to array v-component geostrophic wind.
         std::vector<TF> wls; ///< Pointer to array large-scale vertical velocity.

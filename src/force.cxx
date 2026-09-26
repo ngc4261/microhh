@@ -326,6 +326,19 @@ Force<TF>::Force(Master& masterin, Grid<TF>& gridin, Fields<TF>& fieldsin, Input
     if (swwls_in == "mean" || swwls_in == "local")
         swwls_mom = inputin.get_item<bool>("force", "swwls_mom", "", false);
 
+    // Fiedler-type vortex: a prescribed updraft column (off by default).
+    swvortexforce = inputin.get_item<bool>("force", "swvortexforce", "", false);
+    if (swvortexforce)
+    {
+        vf_amp = inputin.get_item<TF>("force", "vf_amp", "");
+        vf_r   = inputin.get_item<TF>("force", "vf_r"  , "");
+        vf_zb  = inputin.get_item<TF>("force", "vf_zb" , "", TF(0.));
+        vf_zt  = inputin.get_item<TF>("force", "vf_zt" , "");
+        // default centre: middle of the domain
+        vf_x0  = inputin.get_item<TF>("force", "vf_x0" , "", TF(0.5)*inputin.get_item<TF>("grid", "xsize", ""));
+        vf_y0  = inputin.get_item<TF>("force", "vf_y0" , "", TF(0.5)*inputin.get_item<TF>("grid", "ysize", ""));
+    }
+
     // Set the internal switches and read other required input
     // Large-scale pressure forcing.
     if (swlspres_in == "0")
@@ -610,6 +623,29 @@ template <typename TF>
 void Force<TF>::exec(double dt, Thermo<TF>& thermo, Stats<TF>& stats)
 {
     auto& gd = grid.get_grid_data();
+
+    if (swvortexforce)
+    {
+        TF* const wt = fields.mt.at("w")->fld.data();
+        const TF pi = TF(M_PI);
+        for (int k=gd.kstart+1; k<gd.kend; ++k)          // w faces; zh[kstart] is the surface
+        {
+            const TF z = gd.zh[k];
+            if (z <= vf_zb || z >= vf_zt)
+                continue;
+            const TF fz = std::sin(pi*(z-vf_zb)/(vf_zt-vf_zb));
+            for (int j=gd.jstart; j<gd.jend; ++j)
+                for (int i=gd.istart; i<gd.iend; ++i)
+                {
+                    const TF r = std::sqrt((gd.x[i]-vf_x0)*(gd.x[i]-vf_x0) + (gd.y[j]-vf_y0)*(gd.y[j]-vf_y0));
+                    if (r < vf_r)
+                    {
+                        const TF c = std::cos(TF(0.5)*pi*r/vf_r);
+                        wt[i + j*gd.icells + k*gd.ijcells] += vf_amp*c*c*fz;
+                    }
+                }
+        }
+    }
 
     if (swlspres == Large_scale_pressure_type::Fixed_flux)
     {
