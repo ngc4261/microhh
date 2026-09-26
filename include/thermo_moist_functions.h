@@ -56,6 +56,16 @@ namespace Thermo_moist_functions
         return grav<TF> * (virtual_temperature(exn, thl, qt, ql, qi) - thvref) / thvref;
     }
 
+    // Negative buoyancy from the weight of precipitation (qp = qr+qs+qg of the microphysics), which is
+    // not part of qt and therefore not in buoyancy(). Used when [thermo] swprecipbuoyancy=true.
+    // Same as adding -qp to the virtual temperature factor: thv = th*(1 - (1-Rv/Rd) qt - Rv/Rd (ql+qi) - qp).
+    template<typename TF>
+    CUDA_MACRO inline TF buoyancy_precip_loading(const TF exn, const TF thl, const TF ql, const TF qi, const TF qp, const TF thvref)
+    {
+        const TF th = thl + Lv<TF>*ql/(cp<TF>*exn) + Ls<TF>*qi/(cp<TF>*exn);
+        return -grav<TF> * th * qp / thvref;
+    }
+
     template<typename TF>
     CUDA_MACRO inline TF virtual_temperature_no_ql(const TF thl, const TF qt)
     {

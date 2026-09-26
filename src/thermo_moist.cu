@@ -145,6 +145,15 @@ namespace
         return ans;
     }
 
+    // dst += src over all cells (used to sum the precipitation fields for swprecipbuoyancy).
+    template<typename TF> __global__
+    void add_field_g(TF* __restrict__ dst, const TF* __restrict__ src, const int ncells)
+    {
+        const int n = blockIdx.x*blockDim.x + threadIdx.x;
+        if (n < ncells)
+            dst[n] += src[n];
+    }
+
     template<typename TF> __global__
     void calc_buoyancy_tend_2nd_g(TF* __restrict__ wt, TF* __restrict__ th, TF* __restrict__ qt,
                                   TF* __restrict__ thvrefh, TF* __restrict__ exnh, TF* __restrict__ ph,
@@ -171,6 +180,31 @@ namespace
                 wt[ijk] += buoyancy(exnh[k], thh, qth, ssa.ql, ssa.qi, thvrefh[k]);
             else
                 wt[ijk] += buoyancy_no_ql(thh, qth, thvrefh[k]);
+        }
+    }
+
+    // Weight of the precipitation (qp = qr+qs+qg), launched after calc_buoyancy_tend_2nd_g only when
+    // swprecipbuoyancy=true, so the default path is exactly the original kernel.
+    template<typename TF> __global__
+    void calc_precip_loading_tend_2nd_g(TF* __restrict__ wt, const TF* __restrict__ th, const TF* __restrict__ qt,
+                                        const TF* __restrict__ qp, const TF* __restrict__ thvrefh,
+                                        const TF* __restrict__ exnh, const TF* __restrict__ ph,
+                                        int istart, int jstart, int kstart,
+                                        int iend,   int jend,   int kend,
+                                        int jj, int kk)
+    {
+        const int i = blockIdx.x*blockDim.x + threadIdx.x + istart;
+        const int j = blockIdx.y*blockDim.y + threadIdx.y + jstart;
+        const int k = blockIdx.z + kstart;
+
+        if (i < iend && j < jend && k < kend)
+        {
+            const int ijk = i + j*jj + k*kk;
+            const TF thh = static_cast<TF>(0.5) * (th[ijk-kk] + th[ijk]);
+            const TF qth = static_cast<TF>(0.5) * (qt[ijk-kk] + qt[ijk]);
+            const TF qph = static_cast<TF>(0.5) * (qp[ijk-kk] + qp[ijk]);
+            Struct_sat_adjust<TF> ssa = sat_adjust_g(thh, qth, ph[k], exnh[k]);
+            wt[ijk] += buoyancy_precip_loading(exnh[k], thh, ssa.ql, ssa.qi, qph, thvrefh[k]);
         }
     }
 
@@ -953,6 +987,36 @@ void Thermo_moist<TF>::exec(const double dt, Stats<TF>& stats)
             gd.iend,   gd.jend,   gd.kend,
             gd.icells, gd.ijcells);
     cuda_check_error();
+
+    // Optional weight of the precipitation fields of the microphysics (qr, qs, qg), as a separate
+    // kernel so that the default path is untouched.
+    if (swprecipbuoyancy)
+    {
+        auto qp = fields.get_tmp_g();
+        cuda_safe_call(cudaMemset(qp->fld_g, 0, gd.ncells*sizeof(TF)));
+        const int blockn = 256;
+        const int gridn  = gd.ncells/blockn + (gd.ncells%blockn > 0);
+        for (const char* name : {"qr", "qs", "qg"})
+            if (fields.sp.count(name))
+            {
+                add_field_g<TF><<<gridn, blockn>>>(qp->fld_g, fields.sp.at(name)->fld_g, gd.ncells);
+                cuda_check_error();
+            }
+        calc_precip_loading_tend_2nd_g<TF><<<gridGPU, blockGPU>>>(
+                fields.mt.at("w")->fld_g,
+                fields.sp.at("thl")->fld_g,
+                fields.sp.at("qt")->fld_g,
+                qp->fld_g,
+                bs.thvrefh_g,
+                bs.exnrefh_g,
+                bs.prefh_g,
+                gd.istart, gd.jstart, gd.kstart+1,
+                gd.iend,   gd.jend,   gd.kend,
+                gd.icells, gd.ijcells);
+        cuda_check_error();
+        cudaDeviceSynchronize();
+        fields.release_tmp_g(qp);
+    }
 
     cudaDeviceSynchronize();
     stats.calc_tend(*fields.mt.at("w"), tend_name);

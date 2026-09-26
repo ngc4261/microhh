@@ -119,6 +119,54 @@ namespace
         }
     }
 
+    // Weight of the precipitation (qp = qr+qs+qg of the microphysics), called after
+    // calc_buoyancy_tend_2nd only when swprecipbuoyancy=true, so the default path is untouched.
+    template<typename TF>
+    void calc_precip_loading_tend_2nd(
+            TF* restrict wt, const TF* restrict thl, const TF* restrict qt, const TF* restrict qp,
+            const TF* restrict ph, TF* restrict thlh, TF* restrict qth,
+            TF* restrict ql, TF* restrict qi, const TF* restrict thvrefh,
+            const int istart, const int iend,
+            const int jstart, const int jend,
+            const int kstart, const int kend,
+            const int jj, const int kk)
+    {
+        #pragma omp parallel for
+        for (int k=kstart+1; k<kend; k++)
+        {
+            const TF exnh = exner(ph[k]);
+            for (int j=jstart; j<jend; j++)
+                #pragma ivdep
+                for (int i=istart; i<iend; i++)
+                {
+                    const int ijk = i + j*jj + k*kk;
+                    const int ij  = i + j*jj;
+                    thlh[ij] = interp2(thl[ijk-kk], thl[ijk]);
+                    qth[ij]  = interp2(qt[ijk-kk], qt[ijk]);
+                }
+
+            for (int j=jstart; j<jend; j++)
+                #pragma ivdep
+                for (int i=istart; i<iend; i++)
+                {
+                    const int ij  = i + j*jj;
+                    Struct_sat_adjust<TF> ssa = sat_adjust(thlh[ij], qth[ij], ph[k], exnh);
+                    ql[ij] = ssa.ql;
+                    qi[ij] = ssa.qi;
+                }
+
+            for (int j=jstart; j<jend; j++)
+                #pragma ivdep
+                for (int i=istart; i<iend; i++)
+                {
+                    const int ijk = i + j*jj + k*kk;
+                    const int ij  = i + j*jj;
+                    wt[ijk] += buoyancy_precip_loading(exnh, thlh[ij], ql[ij], qi[ij],
+                                                       interp2(qp[ijk-kk], qp[ijk]), thvrefh[k]);
+                }
+        }
+    }
+
     template<typename TF>
     void calc_buoyancy(
             TF* restrict b, TF* restrict thl, TF* restrict qt,
@@ -1122,6 +1170,10 @@ Thermo_moist<TF>::Thermo_moist(Master& masterin, Grid<TF>& gridin, Fields<TF>& f
     // swupdate..=1 -> base state pressure updated before saturation calculation
     bs.swupdatebasestate = inputin.get_item<bool>("thermo", "swupdatebasestate", "", true);
 
+    // Weight of the precipitation fields (qr, qs, qg of the microphysics) in the buoyancy tendency.
+    // Default off = original behaviour (buoyancy from thl, qt, ql, qi only). Added 2026-09-26.
+    swprecipbuoyancy = inputin.get_item<bool>("thermo", "swprecipbuoyancy", "", false);
+
     // Time variable surface pressure
     tdep_pbot = std::make_unique<Timedep<TF>>(master, grid, "p_sbot", inputin.get_item<bool>("thermo", "swtimedep_pbot", "", false));
 
@@ -1396,6 +1448,18 @@ void Thermo_moist<TF>::create(
 {
     fields.set_calc_mean_profs(true);
 
+    if (swprecipbuoyancy)
+    {
+        std::string used;
+        for (const char* name : {"qr", "qs", "qg"})
+            if (fields.sp.count(name))
+                used += std::string(" ") + name;
+        if (used.empty())
+            master.print_message("WARNING: swprecipbuoyancy=true but no precipitation field (qr/qs/qg) exists; no effect\n");
+        else
+            master.print_message("Buoyancy tendency includes the weight of:%s\n", used.c_str());
+    }
+
     // Process the time dependent surface pressure
     std::string timedep_dim = "time_surface";
     tdep_pbot->create_timedep(input_nc, timedep_dim);
@@ -1439,6 +1503,30 @@ void Thermo_moist<TF>::exec(const double dt, Stats<TF>& stats)
             &tmp->fld[2*gd.ijcells], &tmp->fld[3*gd.ijcells], bs.thvrefh.data(),
             gd.istart, gd.iend, gd.jstart, gd.jend, gd.kstart, gd.kend,
             gd.icells, gd.ijcells);
+
+    // Optional weight of the precipitation fields of the microphysics (qr, qs, qg), as a separate
+    // pass so that the default path is untouched.
+    if (swprecipbuoyancy)
+    {
+        auto qp = fields.get_tmp();
+        for (int n=0; n<gd.ncells; ++n)
+            qp->fld[n] = TF(0.);
+        for (const char* name : {"qr", "qs", "qg"})
+            if (fields.sp.count(name))
+            {
+                const TF* src = fields.sp.at(name)->fld.data();
+                for (int n=0; n<gd.ncells; ++n)
+                    qp->fld[n] += src[n];
+            }
+        calc_precip_loading_tend_2nd(
+                fields.mt.at("w")->fld.data(), fields.sp.at("thl")->fld.data(), fields.sp.at("qt")->fld.data(),
+                qp->fld.data(), bs.prefh.data(),
+                &tmp->fld[0*gd.ijcells], &tmp->fld[1*gd.ijcells],
+                &tmp->fld[2*gd.ijcells], &tmp->fld[3*gd.ijcells], bs.thvrefh.data(),
+                gd.istart, gd.iend, gd.jstart, gd.jend, gd.kstart, gd.kend,
+                gd.icells, gd.ijcells);
+        fields.release_tmp(qp);
+    }
 
     fields.release_tmp(tmp);
 

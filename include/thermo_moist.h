@@ -185,6 +185,8 @@ class Thermo_moist : public Thermo<TF>
         Background_state bs;
         Background_state bs_stats;
 
+        bool swprecipbuoyancy; ///< Add the weight of the precipitation fields (qr, qs, qg) to the buoyancy tendency.
+
         std::unique_ptr<Timedep<TF>> tdep_pbot;
         const std::string tend_name = "buoy";
         const std::string tend_longname = "Buoyancy";

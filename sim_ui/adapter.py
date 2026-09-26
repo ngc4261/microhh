@@ -46,6 +46,7 @@ cflmax=1.2
 [diff]
 swdiff=smag2
 dnmax=0.3
+cs={cs:.3f}
 
 [thermo]
 swbasestate=anelastic
@@ -53,6 +54,7 @@ swthermo=moist
 pbot=0
 thvref0=300
 swupdatebasestate=1
+swprecipbuoyancy={swprecipbuoyancy}
 
 [micro]
 swmicro=nsw6
@@ -124,7 +126,8 @@ def schema() -> dict:
         "title": "MicroHH スーパーセル (WK1982、GPU 版)",
         "description": "MicroHH(C++/CUDA、非弾性 LES、単精度、NSW6 1 モーメント微物理)の "
                        "Weisman–Klemp 1982 理想化スーパーセル。初期プロファイル作成 → init → "
-                       "温位バブル → run をコンテナ内で順に実行する。",
+                       "温位バブル → run をコンテナ内で順に実行する。上昇流の強さは「混合の強さ cs」と"
+                       "「浮力に降水の重さ」で調整できる(既定は MicroHH そのまま)。",
         "params": [
             {"name": "itot", "label": "水平格子数(x,y 共通)", "type": "int",
              "default": 96, "min": 32, "max": 768, "unit": ""},
@@ -150,6 +153,11 @@ def schema() -> dict:
              "default": -1.0, "min": -1.0, "max": 200.0, "unit": "km"},
             {"name": "bubble_y_km", "label": "バブル中心 y(負なら領域の中央)", "type": "float",
              "default": -1.0, "min": -1.0, "max": 200.0, "unit": "km"},
+            # 上昇流の強さを決める 2 項目(2026-09-26 の分析: 800 m 格子では希釈が弱く w が 65 m/s になる)。
+            {"name": "smag_cs", "label": "混合の強さ cs(Smagorinsky 定数。0.23 標準、1.2 で CM1 並み)",
+             "type": "float", "default": 0.23, "min": 0.05, "max": 2.0, "unit": ""},
+            {"name": "precip_loading", "label": "浮力に降水の重さ(qr・qs・qg)を入れる", "type": "bool",
+             "default": False},
         ],
         "presets": {
             "quick": {"label": "下見(96x96x48, 800m格子, 10分)",
@@ -158,6 +166,10 @@ def schema() -> dict:
             "standard": {"label": "本番相当(384x384x96, 200m格子, 2時間)※10分前後",
                          "values": {"itot": 384, "ktot": 96, "xsize_km": 76.8, "zsize_km": 19.2,
                                     "sim_time_s": 7200.0, "out_freq_s": 600.0}},
+            "loading": {"label": "降水荷重あり(物理を CM1 に近づける)",
+                        "values": {"precip_loading": True}},
+            "cm1like": {"label": "CM1 並みの上昇流(cs=1.2、チューニング)",
+                        "values": {"smag_cs": 1.2}},
         },
         "estimate_hint": "格子点数 x 積分時間に比例。RTX 3090 実測: 192x192x96 で 1800 s が 22 秒",
     }
@@ -188,9 +200,14 @@ def prepare(params: dict, run_dir) -> dict:
 
     (run_dir / "mhh_params.json").write_text(
         json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8")
+    cs = float(params.get("smag_cs", 0.23))
+    precip_loading = params.get("precip_loading", False)
+    if isinstance(precip_loading, str):
+        precip_loading = precip_loading.strip().lower() in ("1", "true", "yes", "on")
     ini = _INI.format(itot=itot, jtot=itot, ktot=ktot, xsize=xsize, ysize=xsize, zsize=zsize,
                       zstart=max(zsize - 4200.0, 0.75 * zsize), endtime=endtime,
-                      sampletime=out_freq, xz=xsize / 2.0)
+                      sampletime=out_freq, xz=xsize / 2.0, cs=cs,
+                      swprecipbuoyancy="true" if precip_loading else "false")
     (run_dir / "weisman_klemp.ini").write_text(ini, encoding="utf-8")
 
     bubble = ["--bubamp", str(float(params.get("bubble_amp_K", 2.0))),
